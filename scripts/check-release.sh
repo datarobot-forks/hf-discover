@@ -27,7 +27,7 @@ print(tomllib.loads(Path("pyproject.toml").read_text())["project"]["name"])
 PY
 )"
 
-echo "==> Preparing local release for ${project_name} ${project_version}"
+echo "==> Checking release for ${project_name} ${project_version}"
 
 echo "==> Syncing locked dependencies"
 uv sync --locked
@@ -95,4 +95,4 @@ uv venv "${tmpdir}/venv" --python 3.14
 uv pip install --python "${tmpdir}/venv/bin/python" dist/*.whl
 "${tmpdir}/venv/bin/agentfinder" --help >/dev/null
 
-echo "==> Local release artifacts are ready in dist/"
+echo "==> Release artifacts are ready in dist/"

@@ -1,0 +1,92 @@
+name: Prepare Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to prepare, for example: 0.1.4"
+        required: true
+        type: string
+      notes:
+        description: "Single changelog bullet"
+        required: false
+        default: "Prepare release"
+        type: string
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  prepare-release:
+    name: Prepare release PR
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out main
+        uses: actions/checkout@v5
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+
+      - name: Prepare release files
+        run: |
+          python scripts/bump-version.py "${{ inputs.version }}" --notes "${{ inputs.notes }}"
+          uv lock
+
+      - name: Validate release artifacts
+        run: ./scripts/check-release.sh "${{ inputs.version }}"
+
+      - name: Open release PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          branch="release-v${VERSION}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "${branch}"
+          git add pyproject.toml uv.lock CHANGELOG.md
+          git commit -m "chore: release ${VERSION}"
+          git push --force-with-lease origin "${branch}"
+
+          body="$(cat <<EOF
+          ## Summary
+
+          - Bump hf-agentfinder to ${VERSION}
+          - Update uv.lock
+          - Update CHANGELOG.md
+
+          ## Validation
+
+          - ./scripts/check-release.sh ${VERSION}
+
+          After merging, publish by pushing the tag:
+
+          \`\`\`bash
+          git tag v${VERSION}
+          git push origin v${VERSION}
+          \`\`\`
+          EOF
+          )"
+
+          existing_pr="$(gh pr list --head "${branch}" --base main --json number --jq '.[0].number')"
+          if [ -n "${existing_pr}" ]; then
+            gh pr edit "${existing_pr}" --title "chore: release ${VERSION}" --body "${body}"
+          else
+            gh pr create --base main --head "${branch}" --title "chore: release ${VERSION}" --body "${body}"
+          fi
