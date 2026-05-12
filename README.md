@@ -34,8 +34,10 @@ For clients that want raw Space descriptors instead of skills, the same search e
 return `application/vnd.huggingface.space+json` entries with inline JSON metadata.
 
 Requests for `application/mcp-server+json` add `filter=mcp-server` to the downstream Hub
-search and return MCP server catalog entries that point at the Space's Gradio MCP SSE
-endpoint.
+search and return MCP server catalog entries that point at the Space's Gradio MCP endpoint
+using HTTP transport. When Hub runtime metadata includes a Space domain, that domain is
+used for app and MCP URLs; otherwise the adapter falls back to the standard `.hf.space`
+slug convention.
 
 ### Release Automation
 

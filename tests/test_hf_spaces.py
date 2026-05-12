@@ -24,7 +24,7 @@ from agentfinder.hf_spaces import (
     build_space_skill_markdown,
     hf_space_agents_md_url,
     hf_space_app_url,
-    hf_space_mcp_sse_url,
+    hf_space_mcp_url,
     search_hf_spaces,
     space_to_search_result,
 )
@@ -79,6 +79,7 @@ class SearchHandler(BaseHTTPRequestHandler):
 @dataclass
 class Runtime:
     stage: str | None
+    raw: dict[str, object] | None = None
 
 
 @dataclass
@@ -173,10 +174,9 @@ def test_hf_space_app_url_is_best_effort_hf_space_subdomain() -> None:
     assert hf_space_app_url("Alice/Cool.Space") == "https://alice-cool-space.hf.space"
 
 
-def test_hf_space_mcp_sse_url_uses_gradio_mcp_endpoint() -> None:
+def test_hf_space_mcp_url_uses_gradio_mcp_endpoint() -> None:
     assert (
-        hf_space_mcp_sse_url("Alice/Cool.Space")
-        == "https://alice-cool-space.hf.space/gradio_api/mcp/sse"
+        hf_space_mcp_url("Alice/Cool.Space") == "https://alice-cool-space.hf.space/gradio_api/mcp/"
     )
 
 
@@ -185,6 +185,22 @@ def test_hf_space_agents_md_url_uses_raw_resolve_path() -> None:
         hf_space_agents_md_url("alice/cool.space")
         == "https://huggingface.co/spaces/alice/cool.space/resolve/main/agents.md"
     )
+
+
+def test_space_results_prefer_runtime_domain_for_app_and_mcp_urls() -> None:
+    runtime = Runtime(
+        stage="RUNNING",
+        raw={"domains": [{"domain": "custom-runtime-domain.hf.space", "stage": "READY"}]},
+    )
+    space = Space(id="alice/mcp", tags=["mcp-server"], runtime=runtime)
+
+    raw_result = space_to_search_result(cast("SpaceSearchResultLike", space), kind="space")
+    mcp_result = space_to_search_result(cast("SpaceSearchResultLike", space), kind="mcp")
+
+    assert raw_result.data is not None
+    assert raw_result.data["appUrl"] == "https://custom-runtime-domain.hf.space"
+    assert mcp_result.data is not None
+    assert mcp_result.data["url"] == "https://custom-runtime-domain.hf.space/gradio_api/mcp/"
 
 
 def test_search_hf_spaces_uses_supplied_searcher_and_limit() -> None:
@@ -244,8 +260,8 @@ def test_search_hf_spaces_adds_mcp_filter_for_mcp_results() -> None:
     assert [result.mediaType for result in results] == [MCP_SERVER_MEDIA_TYPE]
     assert results[0].data == {
         "name": "hf-space-alice-mcp",
-        "transport": "sse",
-        "url": "https://alice-mcp.hf.space/gradio_api/mcp/sse",
+        "transport": "http",
+        "url": "https://alice-mcp.hf.space/gradio_api/mcp/",
     }
 
 
@@ -312,7 +328,7 @@ def test_cli_result_type_and_endpoint_support_inline_results() -> None:
     space_result = space_to_search_result(cast("SpaceSearchResultLike", space), kind="space")
 
     assert cli._result_type(mcp_result) == "mcp"
-    assert cli._result_endpoint(mcp_result) == "https://alice-mcp.hf.space/gradio_api/mcp/sse"
+    assert cli._result_endpoint(mcp_result) == "https://alice-mcp.hf.space/gradio_api/mcp/"
     assert cli._result_type(space_result) == "space"
     assert cli._result_endpoint(space_result) == "https://alice-mcp.hf.space"
 

@@ -17,6 +17,7 @@ USER_AGENT = "agentfinder/0.1"
 @dataclass
 class SpaceRuntime:
     stage: str | None
+    raw: dict[str, object]
 
 
 class SpaceSearchResult:
@@ -32,7 +33,7 @@ class SpaceSearchResult:
         self.private = data.get("private") is True
         self.tags = _string_list(data.get("tags"))
         self.runtime = (
-            SpaceRuntime(stage=_optional_string(runtime_data.get("stage")))
+            SpaceRuntime(stage=_optional_string(runtime_data.get("stage")), raw=runtime_data)
             if runtime_data is not None
             else None
         )

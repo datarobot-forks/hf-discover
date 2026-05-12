@@ -98,8 +98,8 @@ def hf_space_app_url(space_id: str) -> str:
     return f"https://{slug}.hf.space"
 
 
-def hf_space_mcp_sse_url(space_id: str) -> str:
-    return f"{hf_space_app_url(space_id)}/gradio_api/mcp/sse"
+def hf_space_mcp_url(space_id: str, *, app_url: str | None = None) -> str:
+    return f"{(app_url or hf_space_app_url(space_id)).rstrip('/')}/gradio_api/mcp/"
 
 
 def hf_space_identifier(space_id: str) -> str:
@@ -160,6 +160,26 @@ def is_mcp_space(space: SpaceSearchResultLike) -> bool:
     return MCP_SERVER_TAG in (space.tags or [])
 
 
+def _runtime_domain(space: SpaceSearchResultLike) -> str | None:
+    domains: object = None
+    if space.runtime is None:
+        return None
+    raw = getattr(space.runtime, "raw", None)
+    if isinstance(raw, dict):
+        domains = raw.get("domains")
+    if not isinstance(domains, list):
+        return None
+    domain_values = (domain.get("domain") for domain in domains if isinstance(domain, dict))
+    return next((value for value in domain_values if isinstance(value, str) and value), None)
+
+
+def _space_app_url(space: SpaceSearchResultLike) -> str:
+    domain = _runtime_domain(space)
+    if domain is not None:
+        return f"https://{domain}"
+    return hf_space_app_url(space.id)
+
+
 def _space_metadata(space: SpaceSearchResultLike) -> dict[str, object]:
     return {
         "spaceId": space.id,
@@ -168,7 +188,7 @@ def _space_metadata(space: SpaceSearchResultLike) -> dict[str, object]:
         "sdk": space.sdk,
         "hubUrl": hf_space_url(space.id),
         "agentsMdUrl": hf_space_agents_md_url(space.id),
-        "appUrl": hf_space_app_url(space.id),
+        "appUrl": _space_app_url(space),
         "category": space.ai_category,
         "likes": space.likes,
         "private": space.private,
@@ -219,8 +239,8 @@ def space_to_mcp_result(space: SpaceSearchResultLike) -> SearchResult:
         mediaType=MCP_SERVER_MEDIA_TYPE,
         data={
             "name": skill_name_for_space(space.id),
-            "transport": "sse",
-            "url": hf_space_mcp_sse_url(space.id),
+            "transport": "http",
+            "url": hf_space_mcp_url(space.id, app_url=_space_app_url(space)),
         },
         description=space.ai_short_description,
         tags=_space_tags(space),
