@@ -1,12 +1,21 @@
 from __future__ import annotations
 
-from typing import Annotated
+import json
+from dataclasses import dataclass
+from importlib.metadata import PackageNotFoundError, version
+from typing import Annotated, Literal
+from urllib.error import HTTPError, URLError
+from urllib.parse import urljoin
+from urllib.request import Request as UrlRequest
+from urllib.request import urlopen
 
 import typer
 import uvicorn
 from rich.console import Console
 from rich.table import Table
 
+from agentfinder.challenge import create_challenge_app
+from agentfinder.hf_skills import search_hf_skills
 from agentfinder.hf_spaces import (
     AI_SKILL_MEDIA_TYPE,
     DEFAULT_BASE_URL,
@@ -16,33 +25,126 @@ from agentfinder.hf_spaces import (
     SpaceSearcher,
     search_hf_spaces,
 )
-from agentfinder.models import SearchResponse, SearchResult
+from agentfinder.models import SearchQuery, SearchRequest, SearchResponse, SearchResult
 from agentfinder.server import create_app
 
 console = Console()
-app = typer.Typer(help="Agent Finder registry adapters.", add_completion=False)
-spaces_app = typer.Typer(help="Search and expose Hugging Face Spaces.", add_completion=False)
-app.add_typer(spaces_app, name="spaces")
+PACKAGE_NAME = "hf-agentfinder"
+DEFAULT_REGISTRY_URL = "https://evalstate-hf-agentfinder.hf.space"
+SPEC_HELP = """Find agent-ready Hugging Face Skills, Spaces, Servers.
 
-QueryArg = Annotated[str, typer.Argument(help="Natural-language Spaces search query.")]
+Search the registry and output Agent Finder results as JSON or human readable tables.
+
+Find background removal MCP Servers:
+hf-agentfinder search "remove image background" --json --kind mcp
+
+Find Skills or MCP Servers to train a vision model:
+hf-agentfinder search "train a vision model" --json
+
+Use --kind skill|space|mcp to search fo a specific type.
+Use hf-agentfinder search --help for more information.
+
+"""
+
+app = typer.Typer(
+    help=f"Agent Finder registry adapters.\n\n{SPEC_HELP}",
+    # epilog=(
+    #     "Challenge quickstart: run `agentfinder challenge serve --port 8090`, then "
+    #     '`agentfinder challenge search "find tools" --federation referrals --json`. '
+    #     "Hosted registry search: `agentfinder search QUERY`. "
+    #     "Generic registry search: `agentfinder search --registry-url URL QUERY`."
+    # ),
+    add_completion=False,
+    invoke_without_command=True,
+    no_args_is_help=True,
+)
+challenge_app = typer.Typer(
+    help=(
+        "Run and query deterministic Agent Finder challenge fixtures.\n\n"
+        "The challenge server is intentionally useful for agents learning the spec: "
+        "it returns skills, MCP servers, A2A agents, inline ai-catalog bundles, "
+        "ai-registry entries, referrals, empty registries, and nested registries."
+    ),
+    add_completion=False,
+)
+app.add_typer(challenge_app, name="challenge")
+
+VersionOpt = Annotated[
+    bool,
+    typer.Option(
+        "--version",
+        help="Show the installed hf-agentfinder version and exit.",
+        is_eager=True,
+    ),
+]
+QueryArg = Annotated[str, typer.Argument(help="Natural-language Agent Finder search query.")]
+FederationMode = Literal["auto", "referrals", "none"]
 LimitOpt = Annotated[int, typer.Option("--limit", "-n", min=1, max=100, help="Maximum results.")]
 SdkOpt = Annotated[
     list[str] | None,
-    typer.Option("--sdk", help="Filter by Space SDK. May be passed multiple times."),
+    typer.Option(
+        "--sdk", help="Local Spaces search only. Filter by Space SDK. May be passed multiple times."
+    ),
 ]
 FilterOpt = Annotated[
     list[str] | None,
-    typer.Option("--filter", "-f", help="Filter by Space tag. May be passed multiple times."),
+    typer.Option(
+        "--filter",
+        "-f",
+        help="Local Spaces search only. Filter by Space tag. May be passed multiple times.",
+    ),
 ]
-TokenOpt = Annotated[str | None, typer.Option("--token", help="Hugging Face access token.")]
+TokenOpt = Annotated[
+    str | None,
+    typer.Option(
+        "--token",
+        help=(
+            "Registry Bearer token. Also used as a Hugging Face token for local Spaces search "
+            "or compatible hosted Spaces registries."
+        ),
+    ),
+]
+RegistryUrlOpt = Annotated[
+    str,
+    typer.Option(
+        "--registry-url",
+        help=(
+            "Agent Finder registry URL to query. May be a registry base URL or its /search "
+            "endpoint. Defaults to the hosted hf-agentfinder deployment."
+        ),
+    ),
+]
 IncludeNonRunningOpt = Annotated[
     bool,
-    typer.Option("--include-non-running", help="Include Spaces that are not currently running."),
+    typer.Option(
+        "--include-non-running", help="Local Spaces search only. Include non-running Spaces."
+    ),
+]
+LocalOpt = Annotated[
+    bool,
+    typer.Option(
+        "--local",
+        help="Search directly from this process instead of using an Agent Finder registry URL.",
+    ),
 ]
 JsonOpt = Annotated[bool, typer.Option("--json", help="Emit Agent Finder JSON response.")]
+FederationOpt = Annotated[
+    FederationMode,
+    typer.Option(
+        "--federation",
+        case_sensitive=False,
+        help=(
+            "Agent Finder federation mode to send in SearchRequest.query: none, "
+            "referrals, or auto. Use referrals/auto to ask registries for registry "
+            "referrals that a client can search next."
+        ),
+    ),
+]
 BaseUrlOpt = Annotated[
     str,
-    typer.Option("--base-url", help="Base URL used for generated skill artifact URLs."),
+    typer.Option(
+        "--base-url", help="Local Spaces search only. Base URL used for generated skill URLs."
+    ),
 ]
 KindOpt = Annotated[
     SpaceResultKind,
@@ -55,6 +157,120 @@ KindOpt = Annotated[
         ),
     ),
 ]
+
+
+@dataclass(frozen=True)
+class RegistrySearchResult:
+    response: SearchResponse
+    raw_body: str
+
+
+def _project_version() -> str:
+    try:
+        return version(PACKAGE_NAME)
+    except PackageNotFoundError:
+        return "unknown"
+
+
+def _print_version() -> None:
+    console.print(f"agentfinder {_project_version()}")
+
+
+@app.callback()
+def main(version_requested: VersionOpt = False) -> None:
+    """Agent Finder registry adapters."""
+    if version_requested:
+        _print_version()
+        raise typer.Exit
+
+
+@app.command("version")
+def version_command() -> None:
+    """Show the installed hf-agentfinder version."""
+    _print_version()
+
+
+def _registry_search_url(registry_url: str) -> str:
+    normalized = registry_url.rstrip("/")
+    if normalized.endswith("/search"):
+        return normalized
+    return urljoin(f"{normalized}/", "search")
+
+
+def _media_type_for_kind(kind: SpaceResultKind) -> str | None:
+    media_types: dict[SpaceResultKind, str | None] = {
+        "all": None,
+        "skill": AI_SKILL_MEDIA_TYPE,
+        "mcp": MCP_SERVER_MEDIA_TYPE,
+        "space": HF_SPACE_MEDIA_TYPE,
+    }
+    return media_types[kind]
+
+
+def _registry_search(
+    registry_url: str,
+    query: str,
+    *,
+    limit: int,
+    kind: SpaceResultKind = "all",
+    federation: FederationMode = "none",
+    token: str | None = None,
+) -> RegistrySearchResult:
+    request_body = SearchRequest(
+        query=SearchQuery(text=query, mediaType=_media_type_for_kind(kind), federation=federation),
+        pageSize=limit,
+    )
+    headers = {
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "User-Agent": "agentfinder/0.1",
+    }
+    if token is not None:
+        headers["Authorization"] = f"Bearer {token}"
+
+    request = UrlRequest(  # noqa: S310 - user-supplied registry URL is the point.
+        _registry_search_url(registry_url),
+        data=request_body.model_dump_json(exclude_none=True, exclude_defaults=True).encode("utf-8"),
+        headers=headers,
+        method="POST",
+    )
+    try:
+        with urlopen(request, timeout=30) as response:  # noqa: S310
+            raw_body = response.read().decode("utf-8")
+            return RegistrySearchResult(
+                response=SearchResponse.model_validate_json(raw_body),
+                raw_body=raw_body,
+            )
+    except HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise typer.BadParameter(
+            f"registry search failed with HTTP {exc.code}: {detail}",
+            param_hint="--registry-url",
+        ) from exc
+    except (URLError, TimeoutError, json.JSONDecodeError, ValueError) as exc:
+        raise typer.BadParameter(
+            f"registry search failed: {exc}",
+            param_hint="--registry-url",
+        ) from exc
+
+
+def _registry_search_response(
+    registry_url: str,
+    query: str,
+    *,
+    limit: int,
+    kind: SpaceResultKind = "all",
+    federation: FederationMode = "none",
+    token: str | None = None,
+) -> SearchResponse:
+    return _registry_search(
+        registry_url,
+        query,
+        limit=limit,
+        kind=kind,
+        federation=federation,
+        token=token,
+    ).response
 
 
 def _search_response(
@@ -84,6 +300,36 @@ def _search_response(
     )
 
 
+def _combined_search_response(
+    query: str,
+    *,
+    limit: int,
+    sdk: list[str] | None = None,
+    filters: list[str] | None = None,
+    include_non_running: bool = False,
+    token: bool | str | None = None,
+    base_url: str = DEFAULT_BASE_URL,
+    kind: SpaceResultKind = "all",
+) -> SearchResponse:
+    results: list[SearchResult] = []
+    if kind in {"all", "skill"}:
+        results.extend(search_hf_skills(query, limit=limit))
+    results.extend(
+        search_hf_spaces(
+            query,
+            limit=limit,
+            sdk=sdk,
+            filters=filters,
+            include_non_running=include_non_running,
+            token=token,
+            base_url=base_url,
+            kind=kind,
+        )
+    )
+    results.sort(key=lambda result: result.score, reverse=True)
+    return SearchResponse(results=results[:limit])
+
+
 def _result_type(result: SearchResult) -> str:
     if result.mediaType == AI_SKILL_MEDIA_TYPE:
         return "skill"
@@ -111,8 +357,8 @@ def _result_endpoint(result: SearchResult) -> str:
     )
 
 
-def _print_results(response: SearchResponse) -> None:
-    table = Table(title="Hugging Face Spaces")
+def _print_results(response: SearchResponse, *, title: str = "Search Results") -> None:
+    table = Table(title=title)
     table.add_column("#", justify="right")
     table.add_column("Score", justify="right")
     table.add_column("Type")
@@ -138,59 +384,102 @@ def _print_results(response: SearchResponse) -> None:
     console.print(table)
 
 
+def _print_raw_json(raw_body: str) -> None:
+    console.file.write(raw_body)
+    console.file.write("\n")
+
+
 @app.command("search")
-def search_alias(
+def search_alias(  # noqa: PLR0913 - Typer command surface intentionally maps CLI options.
     query: QueryArg,
     limit: LimitOpt = 10,
     sdk: SdkOpt = None,
     filters: FilterOpt = None,
     include_non_running: IncludeNonRunningOpt = False,
     token: TokenOpt = None,
+    registry_url: RegistryUrlOpt = DEFAULT_REGISTRY_URL,
+    local: LocalOpt = False,
+    federation: FederationOpt = "none",
     json_output: JsonOpt = False,
     base_url: BaseUrlOpt = DEFAULT_BASE_URL,
     kind: KindOpt = "all",
 ) -> None:
-    """Search Hugging Face Spaces and return Agent Finder-shaped results."""
-    response = _search_response(
+    """Search a registry (default Hugging Face).
+
+    By default, POSTs an Agent Finder SearchRequest to the hosted hf-agentfinder registry.
+    Use --registry-url for any compatible registry, or --local for in-process combined
+    Skills and Spaces search. With --json, the CLI prints the registry's raw SearchResponse
+    bytes instead of a normalized/re-serialized model, so reading agents can inspect exact
+    result, referral, url, data, mediaType, and pageToken fields returned by the server.
+    """
+    if local:
+        _ = federation
+        response = _combined_search_response(
+            query,
+            limit=limit,
+            sdk=sdk,
+            filters=filters,
+            include_non_running=include_non_running,
+            token=token,
+            base_url=base_url,
+            kind=kind,
+        )
+        raw_body = response.model_dump_json(exclude_none=True, exclude_defaults=True)
+        title = "Hugging Face Skills and Spaces"
+    else:
+        registry_result = _registry_search(
+            registry_url,
+            query,
+            limit=limit,
+            kind=kind,
+            federation=federation,
+            token=token,
+        )
+        response = registry_result.response
+        raw_body = registry_result.raw_body
+        title = registry_url
+
+    if json_output:
+        _print_raw_json(raw_body)
+    else:
+        _print_results(response, title=title)
+
+
+@challenge_app.command("search")
+def challenge_search(
+    query: QueryArg,
+    registry_url: Annotated[
+        str,
+        typer.Option(
+            "--registry-url",
+            help=(
+                "Challenge registry URL. May be the server base URL or a nested /search URL "
+                "such as http://127.0.0.1:8090/registries/tools/search."
+            ),
+        ),
+    ] = "http://127.0.0.1:8090",
+    limit: LimitOpt = 10,
+    kind: KindOpt = "all",
+    federation: FederationOpt = "referrals",
+    json_output: JsonOpt = False,
+) -> None:
+    """Query a running challenge server.
+
+    Defaults to the local `agentfinder challenge serve` endpoint and requests referrals.
+    Reading agents should use --json to see the raw SearchResponse, follow referrals and
+    application/ai-registry+json result URLs, fetch url artifacts, and parse inline data.
+    """
+    registry_result = _registry_search(
+        registry_url,
         query,
         limit=limit,
-        sdk=sdk,
-        filters=filters,
-        include_non_running=include_non_running,
-        token=token,
-        base_url=base_url,
         kind=kind,
+        federation=federation,
     )
     if json_output:
-        console.print_json(response.model_dump_json(exclude_none=True, exclude_defaults=True))
+        _print_raw_json(registry_result.raw_body)
     else:
-        _print_results(response)
-
-
-@spaces_app.command("search")
-def spaces_search(
-    query: QueryArg,
-    limit: LimitOpt = 10,
-    sdk: SdkOpt = None,
-    filters: FilterOpt = None,
-    include_non_running: IncludeNonRunningOpt = False,
-    token: TokenOpt = None,
-    json_output: JsonOpt = False,
-    base_url: BaseUrlOpt = DEFAULT_BASE_URL,
-    kind: KindOpt = "all",
-) -> None:
-    """Search Hugging Face Spaces and return Agent Finder-shaped results."""
-    search_alias(
-        query=query,
-        limit=limit,
-        sdk=sdk,
-        filters=filters,
-        include_non_running=include_non_running,
-        token=token,
-        json_output=json_output,
-        base_url=base_url,
-        kind=kind,
-    )
+        _print_results(registry_result.response, title=registry_url)
 
 
 @app.command("serve")
@@ -200,9 +489,18 @@ def serve(
     include_non_running: IncludeNonRunningOpt = False,
     token: TokenOpt = None,
 ) -> None:
-    """Serve a thin Agent Finder REST wrapper over Hugging Face Spaces search."""
+    """Start the Agent Finder server."""
     uvicorn.run(
         create_app(include_non_running=include_non_running, token=token),
         host=host,
         port=port,
     )
+
+
+@challenge_app.command("serve")
+def challenge_serve(
+    host: Annotated[str, typer.Option("--host", help="Host to bind.")] = "127.0.0.1",
+    port: Annotated[int, typer.Option("--port", "-p", help="Port to bind.")] = 8090,
+) -> None:
+    """Start Agent Finder test server with challenge fixtures."""
+    uvicorn.run(create_challenge_app(), host=host, port=port)
