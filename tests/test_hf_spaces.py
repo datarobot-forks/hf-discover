@@ -387,10 +387,13 @@ def test_hf_space_mcp_url_uses_gradio_mcp_endpoint() -> None:
 
 
 def test_mcp_server_json_url_for_space_points_at_agentfinder_materializer() -> None:
-    assert mcp_server_json_url_for_space(
-        "Alice/Cool.Space",
-        base_url="https://agentfinder.example",
-    ) == "https://agentfinder.example/mcp/huggingface/Alice/Cool.Space/server.json"
+    assert (
+        mcp_server_json_url_for_space(
+            "Alice/Cool.Space",
+            base_url="https://agentfinder.example",
+        )
+        == "https://agentfinder.example/mcp/huggingface/Alice/Cool.Space/server.json"
+    )
 
 
 def test_build_space_mcp_server_json_uses_space_info_and_remote_endpoint() -> None:

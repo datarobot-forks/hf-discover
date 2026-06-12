@@ -14,7 +14,9 @@ if TYPE_CHECKING:
 
 AI_SKILL_MEDIA_TYPE = "application/ai-skill"
 MCP_SERVER_MEDIA_TYPE = "application/mcp-server+json"
-MCP_SERVER_SCHEMA_URL = "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json"
+MCP_SERVER_SCHEMA_URL = (
+    "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json"
+)
 HF_SPACE_MEDIA_TYPE = "application/vnd.huggingface.space+json"
 HF_SOURCE = "https://huggingface.co"
 SPACES_URL_PREFIX = "https://evalstate-hf-agentfinder.hf.space"
