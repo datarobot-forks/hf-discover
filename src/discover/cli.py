@@ -31,6 +31,7 @@ from discover.hf_spaces import (
     split_space_id,
 )
 from discover.models import SearchQuery, SearchRequest, SearchResponse, SearchResult
+from discover.navigation import NavigationReport, navigate
 from discover.server import FetchSpaceInfo, create_app, fetch_space_info
 
 console = Console()
@@ -142,6 +143,13 @@ LocalOpt = Annotated[
     ),
 ]
 JsonOpt = Annotated[bool, typer.Option("--json", help="Emit ARD JSON response.")]
+DEFAULT_NAVIGATE_URL = "https://huggingface.co/"
+NavigateArgs = Annotated[
+    list[str],
+    typer.Argument(
+        help=(f"QUERY, or URL QUERY. When URL is omitted, defaults to {DEFAULT_NAVIGATE_URL}.")
+    ),
+]
 FederationOpt = Annotated[
     FederationMode,
     typer.Option(
@@ -235,6 +243,14 @@ def _project_version() -> str:
 
 def _print_version() -> None:
     console.print(f"hf-discover {_project_version()}")
+
+
+def parse_navigate_args(args: list[str]) -> tuple[str, str]:
+    if not args:
+        raise ValueError("provide QUERY, or URL QUERY")
+    url = args[0] if len(args) > 1 else DEFAULT_NAVIGATE_URL
+    query = " ".join(args[1:] if len(args) > 1 else args)
+    return url, query
 
 
 @app.callback()
@@ -463,6 +479,13 @@ def _print_raw_json(raw_body: str) -> None:
     console.file.write("\n")
 
 
+def _print_navigation_discovery(report: NavigationReport) -> None:
+    console.print("Discovered ARD resources")
+    for resource in report.discovered:
+        detail = f" ({resource.detail})" if resource.detail else ""
+        console.print(f"- {resource.kind} [{resource.status}] {resource.url}{detail}")
+
+
 def _mcp_server_json_for_space(
     space_id: str,
     *,
@@ -561,6 +584,72 @@ def search_alias(  # noqa: PLR0913 - Typer command surface intentionally maps CL
         _print_raw_json(raw_body)
     else:
         _print_results(response, title=title)
+
+
+@app.command("navigate")
+def navigate_command(  # noqa: PLR0913 - Typer command surface maps user-facing options.
+    args: NavigateArgs,
+    limit: LimitOpt = 10,
+    kind: KindOpt = "all",
+    token: TokenOpt = None,
+    follow_referrals: Annotated[
+        bool,
+        typer.Option(
+            "--follow-referrals/--no-follow-referrals",
+            help="Follow registry referrals returned by discovered search endpoints.",
+        ),
+    ] = False,
+    max_depth: Annotated[
+        int,
+        typer.Option("--max-depth", min=0, max=5, help="Maximum ai-catalog recursion depth."),
+    ] = 2,
+    max_registries: Annotated[
+        int,
+        typer.Option(
+            "--max-registries", min=1, max=50, help="Maximum registry endpoints to query."
+        ),
+    ] = 3,
+    max_per_source: Annotated[
+        int,
+        typer.Option(
+            "--max-per-source",
+            min=1,
+            max=25,
+            help="Maximum results to keep from each discovered catalog or registry.",
+        ),
+    ] = 3,
+    timeout: Annotated[
+        float,
+        typer.Option("--timeout", min=1.0, max=60.0, help="HTTP timeout per request in seconds."),
+    ] = 10.0,
+    json_output: JsonOpt = False,
+) -> None:
+    """Resolve a website's ai-catalog and search discovered ARD registries."""
+    try:
+        url, query = parse_navigate_args(args)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc), param_hint="ARGS") from exc
+    try:
+        report = navigate(
+            url,
+            query,
+            limit=limit,
+            kind=kind,
+            follow_referrals=follow_referrals,
+            max_depth=max_depth,
+            max_registries=max_registries,
+            max_per_source=max_per_source,
+            timeout=timeout,
+            token=token,
+        )
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc), param_hint="URL") from exc
+
+    if json_output:
+        _print_raw_json(report.model_dump_json())
+    else:
+        _print_navigation_discovery(report)
+        _print_results(report.response, title="Navigated Search Results")
 
 
 @challenge_app.command("search")

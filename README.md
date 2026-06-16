@@ -61,6 +61,23 @@ base URL or the `/search` endpoint. In this mode the CLI POSTs an ARD
 paths as the Hugging Face Spaces adapter. Pass `--local` to search directly from the
 current process instead.
 
+### Client-side Catalog Navigation
+
+`hf-discover navigate [URL] QUERY` starts from a website and discovers ARD resources from
+the client. It fetches the site's `/.well-known/ai-catalog.json`, follows linked AI
+catalogs within a small depth limit, searches referenced AI registries, and returns a
+source-balanced set of results for inspection. You can also pass an `ai-catalog.json` URL
+directly; when URL is omitted, navigation starts from `https://huggingface.co/`.
+
+By default, navigation searches up to 3 registries and keeps up to 3 results from each
+discovered source before filling the final result list. This avoids assuming that scores
+from different registries are directly comparable. It can optionally follow registry
+referrals with `--follow-referrals`.
+
+Navigation is intentionally not exposed by the hosted server, because arbitrary URL
+fetching belongs first in a user-controlled client and would need additional SSRF controls
+before becoming a public HTTP feature.
+
 ### Combined Skills and Spaces Registry
 
 The primary HTTP `POST /search` endpoint combines the Meilisearch-backed
@@ -235,6 +252,9 @@ view.
 > hf-discover search "generate image" --kind mcp --json
 > hf-discover mcp-server-json mcp-tools/FLUX.1-Kontext-Dev
 > hf-discover search --registry-url https://registry.example "generate image" --kind skill --json
+> hf-discover navigate "generate image" --kind skill
+> hf-discover navigate https://example.com "generate image" --kind skill
+> hf-discover navigate https://example.com "generate image" --follow-referrals --json
 > hf-discover search "generate image" --kind space --local
 > hf-discover serve --port 8080
 > hf-discover challenge serve --port 8090
